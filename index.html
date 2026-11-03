@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ماسح باينس</title>
+<style>
+body{margin:0;font-family:system-ui,sans-serif;background:#0b0e11;color:#eaecef;padding:14px}
+h1{font-size:20px;margin:0 0 12px;color:#f0b90b}
+button{width:100%;padding:14px;font-size:17px;border:0;border-radius:10px;background:#f0b90b;color:#000;font-weight:700}
+button:disabled{opacity:.5}
+#st{margin:10px 0;color:#848e9c;font-size:14px}
+.c{background:#161a1e;border-radius:10px;padding:12px;margin:8px 0}
+.t{display:flex;justify-content:space-between;font-weight:700}
+.s{color:#0ecb81}
+.m{color:#848e9c;font-size:13px;margin-top:4px}
+.d{font-size:13px;margin-top:6px;direction:ltr;text-align:left}
+.n{color:#848e9c;font-size:12px;margin-top:16px}
+</style>
+</head>
+<body>
+<h1>ماسح باينس (سبوت 1h + 1d)</h1>
+<button id="btn">ابدأ الفحص</button>
+<div id="st">جاهز</div>
+<div id="out"></div>
+<div class="n">أداة تحليل فقط وليست توصية شراء أو بيع. لا تخاطر بأكثر مما تتحمل خسارته.</div>
+<script>
+const BASES=["https://api.binance.com","https://data-api.binance.vision"];
+const MIN_VOL=5e6,MAX_SPREAD=0.15,MIN_DEPTH=5e4,MAX_SYMBOLS=80,TOP=15;
+const STABLES=new Set(["USDC","FDUSD","TUSD","BUSD","DAI","USDP","EUR","EURI","USD1","AEUR","XUSD"]);
+const btn=document.getElementById("btn"),st=document.getElementById("st"),out=document.getElementById("out");
+
+async function get(path){
+  let last="error";
+  for(const b of BASES){
+    try{const r=await fetch(b+path);if(r.ok)return await r.json();last="HTTP "+r.status;}
+    catch(e){last=String(e.message||e);}
+  }
+  throw new Error(last);
+}
+function ema(v,n){const a=2/(n+1),o=[v[0]];for(let i=1;i<v.length;i++)o.push(a*v[i]+(1-a)*o[i-1]);return o;}
+function rsi(c,n=14){
+  const a=1/n,o=[50];let au=null,ad=null;
+  for(let k=1;k<c.length;k++){
+    const d=c[k]-c[k-1],u=Math.max(d,0),dn=Math.max(-d,0);
+    au=au===null?u:a*u+(1-a)*au; ad=ad===null?dn:a*dn+(1-a)*ad;
+    o.push(ad===0?100:100-100/(1+au/ad));
+  }
+  return o;
+}
+function analyze(c,v){
+  if(c.length<60)return[0,[]];
+  const i=c.length-2;
+  const e20=ema(c,20),e50=ema(c,50),e12=ema(c,12),e26=ema(c,26);
+  const m=e12.map((x,k)=>x-e26[k]),sg=ema(m,9),h=m.map((x,k)=>x-sg[k]);
+  const r=rsi(c)[i];
+  let base=0;for(let k=i-20;k<i;k++)base+=v[k];base/=20;
+  const vr=base>0?v[i]/base:0;
+  let s=0;const n=[];
+  if(e20[i]>e50[i]){s++;n.push("EMA20>EMA50");}
+  if(c[i]>e20[i]){s++;n.push("price>EMA20");}
+  if(h[i]>0&&h[i]>h[i-1]){s++;n.push("MACD up");}
+  if(r>=40&&r<=65){s++;n.push("RSI "+r.toFixed(0));}
+  else if(r<30){n.push("RSI "+r.toFixed(0)+" oversold");}
+  if(vr>1.5){s++;n.push("vol x"+vr.toFixed(1));}
+  return[s,n];
+}
+async function klines(sym,tf){
+  const d=await get("/api/v3/klines?symbol="+sym+"&interval="+tf+"&limit=120");
+  return[d.map(k=>+k[4]),d.map(k=>+k[5])];
+}
+async function liquidity(sym){
+  const ob=await get("/api/v3/depth?symbol="+sym+"&limit=100");
+  const bids=ob.bids.map(x=>[+x[0],+x[1]]),asks=ob.asks.map(x=>[+x[0],+x[1]]);
+  const mid=(bids[0][0]+asks[0][0])/2,sp=(asks[0][0]-bids[0][0])/mid*100;
+  let bd=0,ad=0;
+  for(const[p,q]of bids)if(p>=mid*0.99)bd+=p*q;
+  for(const[p,q]of asks)if(p<=mid*1.01)ad+=p*q;
+  return[sp,bd,ad];
+}
+async function scan(){
+  btn.disabled=true;out.innerHTML="";st.textContent="جاري تحميل السوق...";
+  try{
+    const tk=await get("/api/v3/ticker/24hr");
+    const pairs=tk.filter(t=>t.symbol.endsWith("USDT")&&!STABLES.has(t.symbol.slice(0,-4))&&+t.quoteVolume>=MIN_VOL)
+      .map(t=>[t.symbol,+t.quoteVolume]).sort((a,b)=>b[1]-a[1]).slice(0,MAX_SYMBOLS);
+    const res=[];let done=0;
+    const work=async([s,qv])=>{
+      try{
+        const[sp,bd,ad]=await liquidity(s);
+        if(sp<=MAX_SPREAD&&Math.min(bd,ad)>=MIN_DEPTH){
+          let tot=0;const det={};
+          for(const tf of["1h","1d"]){
+            const[c,v]=await klines(s,tf);
+            const[sc,nt]=analyze(c,v);tot+=sc;det[tf]=nt.join(", ");
+          }
+          res.push({tot,s,qv,sp,det});
+        }
+      }catch(e){}
+      done++;st.textContent="جاري التحليل "+done+"/"+pairs.length;
+    };
+    for(let i=0;i<pairs.length;i+=6)await Promise.all(pairs.slice(i,i+6).map(work));
+    res.sort((a,b)=>b.tot-a.tot);
+    if(!res.length){st.textContent="لا توجد عملات اجتازت الفلاتر";}
+    else{
+      st.textContent="تم - اجتازت "+res.length+" عملة فلتر السيولة ("+new Date().toLocaleTimeString("ar")+")";
+      out.innerHTML=res.slice(0,TOP).map(r=>
+        '<div class="c"><div class="t"><span>'+r.s+'</span><span class="s">'+r.tot+'/10</span></div>'+
+        '<div class="m">حجم 24س: $'+(r.qv/1e6).toFixed(0)+'M | فرق السعر: '+r.sp.toFixed(3)+'%</div>'+
+        '<div class="d">1h: '+r.det["1h"]+'<br>1d: '+r.det["1d"]+'</div></div>').join("");
+    }
+  }catch(e){
+    st.textContent="خطأ: "+e.message+" (إذا ظهر 451 فباينس محجوب في منطقتك، جرّب VPN)";
+  }
+  btn.disabled=false;
+}
+btn.addEventListener("click",scan);
+</script>
+</body>
+</html>
